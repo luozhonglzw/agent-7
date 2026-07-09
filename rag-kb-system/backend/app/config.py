@@ -136,7 +136,7 @@ class JWTSettings(BaseSettings):
     )
     algorithm: str = Field(default="HS256", alias="JWT_ALGORITHM")
     access_token_expire_minutes: int = Field(
-        default=30, alias="JWT_ACCESS_TOKEN_EXPIRE_MINUTES", ge=1, le=1440
+        default=15, alias="JWT_ACCESS_TOKEN_EXPIRE_MINUTES", ge=1, le=1440
     )
     refresh_token_expire_days: int = Field(
         default=7, alias="JWT_REFRESH_TOKEN_EXPIRE_DAYS", ge=1, le=30

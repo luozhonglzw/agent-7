@@ -98,7 +98,7 @@ class TestJWTSettings:
         jwt = JWTSettings(JWT_SECRET_KEY="my_secret_key_that_is_long_enough")
 
         assert jwt.algorithm == "HS256"
-        assert jwt.access_token_expire_minutes == 30
+        assert jwt.access_token_expire_minutes == 15
         assert jwt.refresh_token_expire_days == 7
 
     def test_short_secret_key_raises_error(self) -> None:

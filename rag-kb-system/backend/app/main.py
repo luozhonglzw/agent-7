@@ -67,6 +67,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await r.aclose()
         logger.info("Redis connection: OK")
 
+        # Initialize Casbin RBAC policies
+        from app.core.security.rbac import init_default_policies
+        await init_default_policies()
+        logger.info("Casbin RBAC: OK")
+
         logger.info("Application startup complete")
 
     except Exception as e:

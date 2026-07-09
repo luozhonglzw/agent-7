@@ -7,7 +7,7 @@ import uuid
 
 import pytest
 
-from app.models.user import User, UserSession
+from app.models.user import User, UserSession, USER_ROLES
 from app.models.document import DocumentStatus
 
 
@@ -20,14 +20,43 @@ class TestUserModel:
             email="test@example.com",
             username="testuser",
             hashed_password="hashed_value",
-            role="viewer",
+            role="user",
         )
 
         assert user.email == "test@example.com"
         assert user.username == "testuser"
-        assert user.role == "viewer"
+        assert user.role == "user"
         assert user.is_active is True
         assert user.is_superuser is False
+
+    def test_user_roles_constant(self) -> None:
+        """Test USER_ROLES constant contains expected values."""
+        assert "admin" in USER_ROLES
+        assert "manager" in USER_ROLES
+        assert "user" in USER_ROLES
+        assert len(USER_ROLES) == 3
+
+    def test_user_dept_id_optional(self) -> None:
+        """Test dept_id is optional and defaults to None."""
+        user = User(
+            email="test@example.com",
+            username="testuser",
+            hashed_password="hashed",
+            role="user",
+        )
+        assert user.dept_id is None
+
+    def test_user_dept_id_set(self) -> None:
+        """Test dept_id can be set."""
+        dept = uuid.uuid4()
+        user = User(
+            email="test@example.com",
+            username="testuser",
+            hashed_password="hashed",
+            role="user",
+            dept_id=dept,
+        )
+        assert user.dept_id == dept
 
     def test_user_is_admin_for_admin_role(self) -> None:
         """Test is_admin property for admin role."""
@@ -46,22 +75,67 @@ class TestUserModel:
             email="super@example.com",
             username="super",
             hashed_password="hashed",
-            role="viewer",
+            role="user",
             is_superuser=True,
         )
 
         assert user.is_admin is True
 
-    def test_user_is_not_admin_for_viewer(self) -> None:
-        """Test is_admin property for viewer role."""
+    def test_user_is_not_admin_for_user_role(self) -> None:
+        """Test is_admin property for user role."""
         user = User(
-            email="viewer@example.com",
-            username="viewer",
+            email="user@example.com",
+            username="user",
             hashed_password="hashed",
-            role="viewer",
+            role="user",
         )
 
         assert user.is_admin is False
+
+    def test_is_manager_for_manager_role(self) -> None:
+        """Test is_manager property for manager role."""
+        user = User(
+            email="mgr@example.com",
+            username="manager",
+            hashed_password="hashed",
+            role="manager",
+        )
+
+        assert user.is_manager is True
+
+    def test_is_manager_for_admin_role(self) -> None:
+        """Test is_manager property returns True for admin (above manager)."""
+        user = User(
+            email="admin@example.com",
+            username="admin",
+            hashed_password="hashed",
+            role="admin",
+        )
+
+        assert user.is_manager is True
+
+    def test_is_manager_for_user_role(self) -> None:
+        """Test is_manager property returns False for plain user."""
+        user = User(
+            email="user@example.com",
+            username="user",
+            hashed_password="hashed",
+            role="user",
+        )
+
+        assert user.is_manager is False
+
+    def test_is_manager_for_superuser(self) -> None:
+        """Test is_manager property returns True for superuser."""
+        user = User(
+            email="super@example.com",
+            username="super",
+            hashed_password="hashed",
+            role="user",
+            is_superuser=True,
+        )
+
+        assert user.is_manager is True
 
     def test_user_repr(self) -> None:
         """Test User __repr__ method."""
@@ -71,13 +145,13 @@ class TestUserModel:
             email="test@example.com",
             username="testuser",
             hashed_password="hashed",
-            role="editor",
+            role="manager",
         )
 
         repr_str = repr(user)
         assert str(user_id) in repr_str
         assert "test@example.com" in repr_str
-        assert "editor" in repr_str
+        assert "manager" in repr_str
 
 
 class TestDocumentStatus:

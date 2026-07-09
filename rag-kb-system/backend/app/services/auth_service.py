@@ -10,8 +10,9 @@ Usage:
 """
 
 import logging
+import re
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,10 +29,39 @@ from app.exceptions import (
     CredentialsError,
     UserAlreadyExistsError,
     UserNotFoundError,
+    ValidationError,
 )
 from app.models.user import User, UserSession
 
 logger = logging.getLogger(__name__)
+
+# Password strength regex: at least 8 chars, 1 upper, 1 lower, 1 digit.
+_PASSWORD_RE = re.compile(
+    r"^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{8,}$"
+)
+
+
+def _validate_password_strength(password: str) -> None:
+    """Validate password meets complexity requirements.
+
+    Rules: minimum 8 characters, at least one uppercase letter,
+    one lowercase letter, and one digit.
+
+    Args:
+        password: Plain text password to validate.
+
+    Raises:
+        ValidationError: If password is too weak.
+    """
+    if not _PASSWORD_RE.match(password):
+        raise ValidationError(
+            detail=(
+                "Password must be at least 8 characters and contain "
+                "at least one uppercase letter, one lowercase letter, "
+                "and one digit"
+            ),
+            field="password",
+        )
 
 
 class AuthService:
@@ -57,21 +87,30 @@ class AuthService:
         username: str,
         password: str,
         full_name: str | None = None,
+        dept_id: uuid.UUID | None = None,
     ) -> User:
         """Register a new user.
+
+        Validates password strength, checks uniqueness of email and
+        username, hashes the password with bcrypt, and creates the user.
 
         Args:
             email: User email address.
             username: Unique username.
-            password: Plain text password (will be hashed).
+            password: Plain text password (will be validated and hashed).
             full_name: Optional display name.
+            dept_id: Optional department UUID.
 
         Returns:
             Created User instance.
 
         Raises:
             UserAlreadyExistsError: If email or username exists.
+            ValidationError: If password is too weak.
         """
+        # Validate password strength
+        _validate_password_strength(password)
+
         # Check for existing email
         existing = await self.db.execute(
             select(User).where(User.email == email)
@@ -92,7 +131,8 @@ class AuthService:
             username=username,
             hashed_password=get_password_hash(password),
             full_name=full_name,
-            role="viewer",
+            dept_id=dept_id,
+            role="user",
             is_active=True,
         )
         self.db.add(user)
@@ -151,10 +191,8 @@ class AuthService:
             refresh_token=refresh_token,
             user_agent=user_agent,
             ip_address=ip_address,
-            expires_at=datetime.now(timezone.utc).replace(
-                day=datetime.now(timezone.utc).day
-                + settings.jwt.refresh_token_expire_days
-            ),
+            expires_at=datetime.now(timezone.utc)
+            + timedelta(days=settings.jwt.refresh_token_expire_days),
         )
         self.db.add(session)
 
@@ -250,3 +288,70 @@ class AuthService:
         if user is None:
             raise UserNotFoundError(user_id=str(user_id))
         return user
+
+    async def update_profile(
+        self,
+        user_id: uuid.UUID,
+        full_name: str | None = None,
+        avatar_url: str | None = None,
+    ) -> User:
+        """Update user profile fields.
+
+        Only updates fields that are explicitly provided (not None).
+
+        Args:
+            user_id: User UUID.
+            full_name: New display name (None to skip).
+            avatar_url: New avatar URL (None to skip).
+
+        Returns:
+            Updated User instance.
+
+        Raises:
+            UserNotFoundError: If user not found.
+        """
+        user = await self.get_user_by_id(user_id)
+
+        if full_name is not None:
+            user.full_name = full_name
+        if avatar_url is not None:
+            user.avatar_url = avatar_url
+
+        await self.db.flush()
+        await self.db.refresh(user)
+
+        logger.info("User profile updated: %s", user_id)
+        return user
+
+    async def change_password(
+        self,
+        user_id: uuid.UUID,
+        current_password: str,
+        new_password: str,
+    ) -> None:
+        """Change user password.
+
+        Verifies the current password, validates the new password
+        strength, and updates the hash.
+
+        Args:
+            user_id: User UUID.
+            current_password: Current password for verification.
+            new_password: New password to set.
+
+        Raises:
+            UserNotFoundError: If user not found.
+            CredentialsError: If current password is wrong.
+            ValidationError: If new password is too weak.
+        """
+        user = await self.get_user_by_id(user_id)
+
+        if not verify_password(current_password, user.hashed_password):
+            raise CredentialsError(detail="Current password is incorrect")
+
+        _validate_password_strength(new_password)
+
+        user.hashed_password = get_password_hash(new_password)
+        await self.db.flush()
+
+        logger.info("Password changed for user: %s", user_id)

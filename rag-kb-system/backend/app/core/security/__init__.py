@@ -9,6 +9,7 @@ Usage:
         verify_password,
         get_password_hash,
     )
+    from app.core.security.rbac import get_enforcer, check_permission
 """
 
 from app.core.security.jwt import (

@@ -17,6 +17,9 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import BaseModel
 
+# Valid role values for the User model.
+USER_ROLES = ("admin", "manager", "user")
+
 
 class User(BaseModel):
     """User account model.
@@ -29,7 +32,8 @@ class User(BaseModel):
         username: Unique display name.
         hashed_password: Bcrypt-hashed password.
         full_name: Optional full display name.
-        role: User role for RBAC (admin/editor/viewer).
+        role: User role for RBAC (admin/manager/user).
+        dept_id: Department UUID for department-scoped permissions.
         is_active: Whether the account is active.
         is_superuser: Whether the user has superuser privileges.
         avatar_url: Optional avatar image URL.
@@ -40,6 +44,7 @@ class User(BaseModel):
     __tablename__ = "users"
     __table_args__ = (
         Index("ix_users_email_active", "email", "is_active"),
+        Index("ix_users_dept", "dept_id"),
         {"comment": "User accounts"},
     )
 
@@ -69,9 +74,15 @@ class User(BaseModel):
     )
     role: Mapped[str] = mapped_column(
         String(50),
-        default="viewer",
+        default="user",
         nullable=False,
-        comment="User role: admin, editor, viewer",
+        comment="User role: admin, manager, user",
+    )
+    dept_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        nullable=True,
+        index=True,
+        comment="Department UUID for dept-scoped permissions",
     )
     is_active: Mapped[bool] = mapped_column(
         Boolean,
@@ -112,6 +123,15 @@ class User(BaseModel):
             True if user is admin or superuser.
         """
         return self.role == "admin" or self.is_superuser
+
+    @property
+    def is_manager(self) -> bool:
+        """Check if user has manager role or above.
+
+        Returns:
+            True if user is manager, admin, or superuser.
+        """
+        return self.role in ("admin", "manager") or self.is_superuser
 
     def __repr__(self) -> str:
         return f"<User(id={self.id}, email='{self.email}', role='{self.role}')>"
