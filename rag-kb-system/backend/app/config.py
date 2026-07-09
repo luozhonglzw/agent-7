@@ -247,7 +247,11 @@ class StorageSettings(BaseSettings):
         default=50, alias="MAX_FILE_SIZE_MB", ge=1, le=500
     )
     allowed_extensions: str = Field(
-        default=".pdf,.docx,.doc,.md,.txt,.pptx,.ppt",
+        default=(
+            ".pdf,.docx,.doc,.md,.txt,.pptx,.ppt,"
+            ".py,.js,.ts,.java,.cpp,.c,.go,.rs,.rb,.php,"
+            ".html,.css,.json,.yaml,.yml,.toml,.sql,.sh"
+        ),
         alias="ALLOWED_EXTENSIONS",
     )
 

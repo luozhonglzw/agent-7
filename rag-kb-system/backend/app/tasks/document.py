@@ -11,12 +11,32 @@ Tasks:
 import logging
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
-from celery import shared_task
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.celery_app import celery_app
+from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+# Sync engine for Celery workers (cannot use async in Celery tasks).
+_sync_engine = None
+_SyncSessionLocal = None
+
+
+def _get_sync_session() -> Session:
+    """Get a synchronous database session for Celery tasks.
+
+    Returns:
+        SQLAlchemy sync session.
+    """
+    global _sync_engine, _SyncSessionLocal  # noqa: PLW0603
+    if _sync_engine is None:
+        _sync_engine = create_engine(settings.db.sync_url, pool_pre_ping=True)
+        _SyncSessionLocal = sessionmaker(bind=_sync_engine)
+    return _SyncSessionLocal()
 
 
 @celery_app.task(
@@ -44,11 +64,7 @@ def process_document(self, document_id: str, file_path: str, file_type: str) -> 
         file_type: File extension (pdf, docx, md, etc.).
 
     Returns:
-        Dictionary with processing results:
-        - document_id: Processed document ID
-        - chunk_count: Number of chunks created
-        - token_count: Total tokens across all chunks
-        - status: Final status (ready/failed)
+        Dictionary with processing results.
 
     Raises:
         Retry: If processing fails and retries remain.
@@ -63,44 +79,50 @@ def process_document(self, document_id: str, file_path: str, file_type: str) -> 
         _update_document_status(document_id, "parsing")
 
         # Stage 1: Parse document
-        # TODO: Implement in Phase 3 with core.parsers
-        content = _parse_document(file_path, file_type)
-        logger.info("Parsed document %s: %d chars", document_id, len(content))
+        parsed_doc = _parse_document(file_path, file_type)
+        logger.info(
+            "Parsed document %s: %d pages, %d chars, title='%s'",
+            document_id, parsed_doc.page_count, parsed_doc.char_count, parsed_doc.title,
+        )
+
+        # Update title from parsed content if not already set
+        _update_document_title(document_id, parsed_doc.title)
 
         # Update status to CHUNKING
         _update_document_status(document_id, "chunking")
 
         # Stage 2: Split into chunks
-        # TODO: Implement in Phase 3 with core.chunking
-        chunks = _chunk_content(content)
+        chunks = _chunk_content(parsed_doc.full_text)
         logger.info("Chunked document %s: %d chunks", document_id, len(chunks))
+
+        # Stage 3: Store chunks in PostgreSQL
+        _store_chunks(document_id, chunks)
 
         # Update status to EMBEDDING
         _update_document_status(document_id, "embedding")
 
-        # Stage 3: Generate embeddings
-        # TODO: Implement in Phase 4 with core.retrieval
-        embeddings = _generate_embeddings(chunks)
-        logger.info("Embedded document %s: %d vectors", document_id, len(embeddings))
+        # Stage 4: Generate embeddings (stub — Phase 4)
+        # embeddings = _generate_embeddings(chunks)
 
         # Update status to INDEXING
         _update_document_status(document_id, "indexing")
 
-        # Stage 4: Store in Qdrant
-        # TODO: Implement in Phase 4 with core.retrieval
-        _store_vectors(document_id, chunks, embeddings)
+        # Stage 5: Store in Qdrant (stub — Phase 4)
+        # _store_vectors(document_id, chunks, embeddings)
 
-        # Stage 5: Update document status to READY
+        # Stage 6: Update document status to READY
+        token_count = sum(len(c.split()) for c in chunks)
         _update_document_status(
             document_id,
             "ready",
             chunk_count=len(chunks),
-            token_count=sum(len(c.split()) for c in chunks),
+            token_count=token_count,
         )
 
         result = {
             "document_id": document_id,
             "chunk_count": len(chunks),
+            "token_count": token_count,
             "status": "ready",
         }
         logger.info("Document processing complete: %s", result)
@@ -111,7 +133,7 @@ def process_document(self, document_id: str, file_path: str, file_type: str) -> 
             "Document processing failed: doc_id=%s, error=%s",
             document_id, str(exc),
         )
-        _update_document_status(document_id, "failed", error_message=str(exc))
+        _update_document_status(document_id, "failed", error_message=str(exc)[:500])
 
         # Retry if we have retries left
         if self.request.retries < self.max_retries:
@@ -134,8 +156,6 @@ def process_document(self, document_id: str, file_path: str, file_type: str) -> 
 def reprocess_document(self, document_id: str) -> dict:
     """Re-process a document that failed or needs updating.
 
-    Deletes existing chunks and vectors before re-processing.
-
     Args:
         document_id: UUID of the document to reprocess.
 
@@ -144,23 +164,36 @@ def reprocess_document(self, document_id: str) -> dict:
     """
     logger.info("Reprocessing document: %s", document_id)
 
+    session = _get_sync_session()
     try:
-        # TODO: Implement cleanup of existing chunks/vectors
-        # Then run the full pipeline
+        from app.models.document import Document
+
+        doc = session.query(Document).filter(Document.id == uuid.UUID(document_id)).first()
+        if doc is None:
+            return {"document_id": document_id, "status": "failed", "error": "Document not found"}
+
+        # Delete existing chunks
+        from app.models.document import DocumentChunk
+        session.query(DocumentChunk).filter(
+            DocumentChunk.document_id == uuid.UUID(document_id)
+        ).delete()
+        session.commit()
+
+        # Run the full pipeline
         return process_document.apply_async(
-            args=[document_id, "", ""],
+            args=[document_id, doc.file_path, doc.file_type],
+            task_id=document_id,
         ).get(timeout=600)
 
     except Exception as exc:
         logger.exception("Reprocessing failed: doc_id=%s", document_id)
-        return {
-            "document_id": document_id,
-            "status": "failed",
-            "error": str(exc),
-        }
+        return {"document_id": document_id, "status": "failed", "error": str(exc)}
+    finally:
+        session.close()
 
 
 # ── Internal Helpers ───────────────────────────────────────────
+
 
 def _update_document_status(
     document_id: str,
@@ -169,7 +202,7 @@ def _update_document_status(
     token_count: int | None = None,
     error_message: str | None = None,
 ) -> None:
-    """Update document processing status in database.
+    """Update document processing status in database (sync).
 
     Args:
         document_id: Document UUID.
@@ -178,14 +211,63 @@ def _update_document_status(
         token_count: Optional token count to update.
         error_message: Optional error message.
     """
-    # TODO: Implement database update in Phase 3
-    logger.info(
-        "Document %s status -> %s (chunks=%s, tokens=%s, error=%s)",
-        document_id, status, chunk_count, token_count, error_message,
-    )
+    from app.models.document import Document, DocumentStatus
+
+    session = _get_sync_session()
+    try:
+        doc = session.query(Document).filter(
+            Document.id == uuid.UUID(document_id)
+        ).first()
+        if doc is None:
+            logger.warning("Document not found for status update: %s", document_id)
+            return
+
+        doc.status = DocumentStatus(status)
+        if chunk_count is not None:
+            doc.chunk_count = chunk_count
+        if token_count is not None:
+            doc.token_count = token_count
+        if error_message is not None:
+            doc.error_message = error_message
+        if status == "ready":
+            doc.processed_at = datetime.now(timezone.utc)
+
+        session.commit()
+        logger.debug("Document %s status -> %s", document_id, status)
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
 
 
-def _parse_document(file_path: str, file_type: str) -> str:
+def _update_document_title(document_id: str, title: str) -> None:
+    """Update document title from parsed content.
+
+    Args:
+        document_id: Document UUID.
+        title: Extracted title.
+    """
+    if not title:
+        return
+
+    from app.models.document import Document
+
+    session = _get_sync_session()
+    try:
+        doc = session.query(Document).filter(
+            Document.id == uuid.UUID(document_id)
+        ).first()
+        if doc and not doc.title:
+            doc.title = title[:500]
+            session.commit()
+    except Exception:
+        session.rollback()
+    finally:
+        session.close()
+
+
+def _parse_document(file_path: str, file_type: str):
     """Parse document content from file.
 
     Args:
@@ -193,52 +275,84 @@ def _parse_document(file_path: str, file_type: str) -> str:
         file_type: File extension.
 
     Returns:
-        Extracted text content.
-
-    Raises:
-        ValueError: If file type is not supported.
+        ParsedDocument instance.
     """
-    # TODO: Implement in Phase 3 with core.parsers
-    raise NotImplementedError("Document parsing not yet implemented")
+    from app.core.parsers import parse_file
+
+    return parse_file(Path(file_path))
 
 
-def _chunk_content(content: str) -> list[str]:
+def _chunk_content(content: str, chunk_size: int = 1000, overlap: int = 200) -> list[str]:
     """Split content into overlapping chunks.
+
+    Uses a simple word-boundary approach.  Phase 3 will add
+    recursive and semantic chunking strategies.
 
     Args:
         content: Full document text.
+        chunk_size: Target chunk size in characters.
+        overlap: Overlap between adjacent chunks in characters.
 
     Returns:
         List of text chunks.
     """
-    # TODO: Implement in Phase 3 with core.chunking
-    raise NotImplementedError("Chunking not yet implemented")
+    if not content.strip():
+        return []
+
+    chunks: list[str] = []
+    start = 0
+    content_len = len(content)
+
+    while start < content_len:
+        end = min(start + chunk_size, content_len)
+
+        # Try to break at a sentence or word boundary
+        if end < content_len:
+            # Look for sentence boundary
+            for sep in (". ", "。", "\n\n", "\n"):
+                last_sep = content.rfind(sep, start + chunk_size // 2, end)
+                if last_sep > start:
+                    end = last_sep + len(sep)
+                    break
+            else:
+                # Fall back to word boundary
+                last_space = content.rfind(" ", start + chunk_size // 2, end)
+                if last_space > start:
+                    end = last_space + 1
+
+        chunk = content[start:end].strip()
+        if chunk:
+            chunks.append(chunk)
+
+        start = max(start + 1, end - overlap)
+
+    return chunks
 
 
-def _generate_embeddings(chunks: list[str]) -> list[list[float]]:
-    """Generate embeddings for text chunks.
-
-    Args:
-        chunks: List of text chunks.
-
-    Returns:
-        List of embedding vectors.
-    """
-    # TODO: Implement in Phase 4 with core.retrieval
-    raise NotImplementedError("Embedding generation not yet implemented")
-
-
-def _store_vectors(
-    document_id: str,
-    chunks: list[str],
-    embeddings: list[list[float]],
-) -> None:
-    """Store vectors in Qdrant.
+def _store_chunks(document_id: str, chunks: list[str]) -> None:
+    """Store parsed chunks in PostgreSQL (sync).
 
     Args:
         document_id: Document UUID.
-        chunks: Text chunks.
-        embeddings: Embedding vectors.
+        chunks: List of text chunks.
     """
-    # TODO: Implement in Phase 4 with core.retrieval
-    raise NotImplementedError("Vector storage not yet implemented")
+    from app.models.document import DocumentChunk
+
+    session = _get_sync_session()
+    try:
+        doc_uuid = uuid.UUID(document_id)
+        for i, chunk_text in enumerate(chunks):
+            chunk = DocumentChunk(
+                document_id=doc_uuid,
+                chunk_index=i,
+                content=chunk_text,
+                token_count=len(chunk_text.split()),
+            )
+            session.add(chunk)
+        session.commit()
+        logger.debug("Stored %d chunks for document %s", len(chunks), document_id)
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
