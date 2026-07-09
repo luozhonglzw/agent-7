@@ -81,9 +81,22 @@ def process_document(self, document_id: str, file_path: str, file_type: str) -> 
         # Stage 1: Parse document
         parsed_doc = _parse_document(file_path, file_type)
         logger.info(
-            "Parsed document %s: %d pages, %d chars, title='%s'",
-            document_id, parsed_doc.page_count, parsed_doc.char_count, parsed_doc.title,
+            "Parsed document %s: %d pages, %d chars, title='%s', type=%s, parser=%s",
+            document_id, parsed_doc.page_count, parsed_doc.char_count,
+            parsed_doc.title,
+            parsed_doc.metadata.get("type", "unknown"),
+            parsed_doc.metadata.get("parser", "unknown"),
         )
+
+        # Record parser type in metadata
+        _update_document_metadata(document_id, {
+            "parser_type": parsed_doc.metadata.get("type"),
+            "parser_name": parsed_doc.metadata.get("parser"),
+            "native_pages": parsed_doc.metadata.get("native_pages"),
+            "scanned_pages": parsed_doc.metadata.get("scanned_pages"),
+            "section_count": len(parsed_doc.sections),
+            "table_count": len(parsed_doc.tables),
+        })
 
         # Update title from parsed content if not already set
         _update_document_title(document_id, parsed_doc.title)
@@ -267,8 +280,39 @@ def _update_document_title(document_id: str, title: str) -> None:
         session.close()
 
 
+def _update_document_metadata(document_id: str, extra: dict) -> None:
+    """Merge parser metadata into the document's metadata_extra field.
+
+    Args:
+        document_id: Document UUID.
+        extra: Key-value pairs to merge into metadata_extra.
+    """
+    from app.models.document import Document
+
+    session = _get_sync_session()
+    try:
+        doc = session.query(Document).filter(
+            Document.id == uuid.UUID(document_id)
+        ).first()
+        if doc is None:
+            return
+        existing = doc.metadata_extra or {}
+        existing.update(extra)
+        doc.metadata_extra = existing
+        session.commit()
+        logger.debug("Document %s metadata updated: %s", document_id, extra)
+    except Exception:
+        session.rollback()
+    finally:
+        session.close()
+
+
 def _parse_document(file_path: str, file_type: str):
     """Parse document content from file.
+
+    For PDF files, uses the new classification pipeline
+    (PDFClassifier → specialized parser).  For all other
+    formats, uses the legacy factory.
 
     Args:
         file_path: Path to the document file.
@@ -277,9 +321,14 @@ def _parse_document(file_path: str, file_type: str):
     Returns:
         ParsedDocument instance.
     """
-    from app.core.parsers import parse_file
+    path = Path(file_path)
 
-    return parse_file(Path(file_path))
+    if file_type.lower() == ".pdf":
+        from app.core.parsers.parser_factory import ParserFactory
+        return ParserFactory.parse_file(path)
+    else:
+        from app.core.parsers import parse_file
+        return parse_file(path)
 
 
 def _chunk_content(content: str, chunk_size: int = 1000, overlap: int = 200) -> list[str]:

@@ -15,7 +15,52 @@ Usage::
 
 import abc
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
+from typing import Any
+
+
+# ═══════════════════════════════════════════════════════════════
+# PDF Classification Types
+# ═══════════════════════════════════════════════════════════════
+
+
+class PDFType(str, Enum):
+    """PDF document type classification.
+
+    The classifier examines each page to determine the overall type.
+    """
+
+    NATIVE = "native"      # 100% digital text (PyMuPDF direct extraction)
+    SCANNED = "scanned"    # 100% image-based (requires OCR)
+    HYBRID = "hybrid"      # Mix of digital and scanned pages
+    COMPLEX = "complex"    # Complex layout (multi-column, tables, figures)
+
+
+@dataclass
+class PageClassification:
+    """Per-page classification result.
+
+    Attributes:
+        page_number: 1-based page number.
+        text_blocks: Number of text blocks detected.
+        text_ratio: Ratio of text area to page area (0.0–1.0).
+        image_count: Number of images on the page.
+        page_type: Classified page type (native/scanned).
+        confidence: Classification confidence (0.0–1.0).
+    """
+
+    page_number: int
+    text_blocks: int = 0
+    text_ratio: float = 0.0
+    image_count: int = 0
+    page_type: str = "native"
+    confidence: float = 0.0
+
+
+# ═══════════════════════════════════════════════════════════════
+# Parsed Page / Section / Table
+# ═══════════════════════════════════════════════════════════════
 
 
 @dataclass
@@ -28,10 +73,8 @@ class ParsedPage:
         heading: Section heading associated with this page (if any).
         heading_level: Heading hierarchy level (1-6).
         element_type: Semantic element type (Title, NarrativeText, Table,
-            ListItem, etc.).  Populated by UnstructuredParser; other
-            parsers leave it as the default empty string.
-        source: Source filename.  Populated by the parser so downstream
-            components can trace content back to its origin.
+            ListItem, etc.).
+        source: Source filename.
     """
 
     page_number: int | None = None
@@ -41,7 +84,7 @@ class ParsedPage:
     element_type: str = ""
     source: str = ""
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         """Serialize to the unified metadata format.
 
         Returns::
@@ -62,6 +105,65 @@ class ParsedPage:
 
 
 @dataclass
+class ParsedSection:
+    """A semantic section extracted from the document.
+
+    Carries structural information (heading level, bounding box)
+    so that downstream components can reconstruct the document
+    outline and provide precise citations.
+
+    Attributes:
+        type: Element type (Title, NarrativeText, Table, ListItem, …).
+        level: Heading level (1-6, 0 for non-heading elements).
+        text: Section text content.
+        page: 1-based page number where the section starts.
+        bbox: Bounding box ``[x0, y0, x1, y1]`` in PDF points (if known).
+        confidence: Extraction confidence (0.0–1.0, 1.0 for digital text).
+    """
+
+    type: str = "NarrativeText"
+    level: int = 0
+    text: str = ""
+    page: int | None = None
+    bbox: list[float] | None = None
+    confidence: float = 1.0
+
+
+@dataclass
+class ParsedTable:
+    """A table extracted from the document.
+
+    Attributes:
+        page: 1-based page number.
+        rows: Table data as list of rows (each row is a list of strings).
+        bbox: Bounding box ``[x0, y0, x1, y1]`` in PDF points.
+        html: HTML representation of the table (if available).
+        markdown: Markdown representation of the table.
+    """
+
+    page: int | None = None
+    rows: list[list[str]] = field(default_factory=list)
+    bbox: list[float] | None = None
+    html: str = ""
+    markdown: str = ""
+
+    @property
+    def row_count(self) -> int:
+        """Number of rows."""
+        return len(self.rows)
+
+    @property
+    def col_count(self) -> int:
+        """Number of columns (width of the widest row)."""
+        return max((len(r) for r in self.rows), default=0)
+
+
+# ═══════════════════════════════════════════════════════════════
+# Unified Parsed Document
+# ═══════════════════════════════════════════════════════════════
+
+
+@dataclass
 class ParsedDocument:
     """Unified output from all document parsers.
 
@@ -70,16 +172,31 @@ class ParsedDocument:
     format.
 
     Attributes:
-        title: Document title (from metadata, first heading, or filename).
+        title: Document title.
+        content: Full plain text (alias for full_text).
         pages: Ordered list of parsed pages/sections.
         full_text: Concatenated plain text of the entire document.
+        sections: Semantic sections with type/bbox/confidence.
+        tables: Extracted tables with cell data.
+        source_path: Absolute path to the source file.
         metadata: Format-specific metadata (author, creation date, etc.).
     """
 
     title: str = ""
+    content: str = ""
     pages: list[ParsedPage] = field(default_factory=list)
     full_text: str = ""
-    metadata: dict = field(default_factory=dict)
+    sections: list[ParsedSection] = field(default_factory=list)
+    tables: list[ParsedTable] = field(default_factory=list)
+    source_path: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """Sync content and full_text if only one is set."""
+        if self.full_text and not self.content:
+            self.content = self.full_text
+        elif self.content and not self.full_text:
+            self.full_text = self.content
 
     @property
     def page_count(self) -> int:
@@ -99,59 +216,11 @@ class ParsedDocument:
         """
         return len(self.full_text)
 
-
-class BaseParser(abc.ABC):
-    """Abstract base class for document parsers.
-
-    Subclasses must implement :meth:`parse` and :meth:`supported_extensions`.
-
-    Usage::
-
-        parser = PDFParser()
-        if parser.supports(Path("report.pdf")):
-            doc = parser.parse(Path("report.pdf"))
-    """
-
-    @abc.abstractmethod
-    def parse(self, file_path: Path) -> ParsedDocument:
-        """Parse a file and return a ``ParsedDocument``.
-
-        Args:
-            file_path: Absolute path to the file to parse.
+    @property
+    def pdf_type(self) -> str | None:
+        """PDF classification type (if set in metadata).
 
         Returns:
-            Parsed document with extracted text and metadata.
-
-        Raises:
-            ParserError: If parsing fails.
+            PDF type string or None.
         """
-
-    @abc.abstractmethod
-    def supported_extensions(self) -> list[str]:
-        """Return the file extensions this parser handles.
-
-        Returns:
-            List of lowercase extensions including the leading dot,
-            e.g. ``[".pdf"]``.
-        """
-
-    def supports(self, file_path: Path) -> bool:
-        """Check whether this parser can handle the given file.
-
-        Args:
-            file_path: Path to check.
-
-        Returns:
-            ``True`` if the file extension is in
-            :meth:`supported_extensions`.
-        """
-        return file_path.suffix.lower() in self.supported_extensions()
-
-
-class ParserError(Exception):
-    """Raised when a parser fails to extract content from a file."""
-
-    def __init__(self, detail: str = "", file_path: str = "") -> None:
-        self.detail = detail
-        self.file_path = file_path
-        super().__init__(f"Parser error for '{file_path}': {detail}")
+        return self.metadata.get("type")

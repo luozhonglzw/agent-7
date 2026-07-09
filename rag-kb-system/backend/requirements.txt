@@ -34,6 +34,11 @@ markdown>=3.7,<3.8
 beautifulsoup4>=4.12.0,<4.13.0
 unstructured[pdf]>=0.16.0,<0.18.0
 unstructured[docx]>=0.16.0,<0.18.0
+pdf2image>=1.17.0,<1.18.0
+paddlepaddle>=2.6.0,<2.7.0
+paddleocr>=2.7.0,<2.9.0
+docling>=2.0.0,<2.4.0
+pillow>=10.0.0,<11.0.0
 
 # ── Text Processing ────────────────────────────────────────────
 rank-bm25>=0.2.2,<0.3.0

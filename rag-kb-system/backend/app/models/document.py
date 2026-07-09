@@ -176,6 +176,12 @@ class Document(BaseModel):
         lazy="selectin",
         order_by="DocumentChunk.chunk_index",
     )
+    knowledge_bases: Mapped[list["KnowledgeBase"]] = relationship(
+        "KnowledgeBase",
+        secondary="kb_documents",
+        back_populates="documents",
+        lazy="selectin",
+    )
 
     @property
     def is_ready(self) -> bool:
