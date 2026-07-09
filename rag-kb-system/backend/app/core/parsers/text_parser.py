@@ -47,7 +47,12 @@ class TXTParser(BaseParser):
         """
         content = self._read_file(file_path)
 
-        page = ParsedPage(page_number=1, content=content)
+        page = ParsedPage(
+            page_number=1,
+            content=content,
+            element_type="NarrativeText",
+            source=file_path.name,
+        )
 
         logger.debug(
             "Parsed TXT %s: %d chars", file_path.name, len(content),
@@ -57,7 +62,7 @@ class TXTParser(BaseParser):
             title=file_path.stem,
             pages=[page],
             full_text=content,
-            metadata={},
+            metadata={"source": file_path.name},
         )
 
     @staticmethod

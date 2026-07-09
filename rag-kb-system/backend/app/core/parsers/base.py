@@ -27,12 +27,38 @@ class ParsedPage:
         content: Text content of the page.
         heading: Section heading associated with this page (if any).
         heading_level: Heading hierarchy level (1-6).
+        element_type: Semantic element type (Title, NarrativeText, Table,
+            ListItem, etc.).  Populated by UnstructuredParser; other
+            parsers leave it as the default empty string.
+        source: Source filename.  Populated by the parser so downstream
+            components can trace content back to its origin.
     """
 
     page_number: int | None = None
     content: str = ""
     heading: str | None = None
     heading_level: int | None = None
+    element_type: str = ""
+    source: str = ""
+
+    def to_dict(self) -> dict:
+        """Serialize to the unified metadata format.
+
+        Returns::
+
+            {
+                "content": "<text>",
+                "metadata": {"page": 1, "type": "Title", "source": "file.pdf"}
+            }
+        """
+        return {
+            "content": self.content,
+            "metadata": {
+                "page": self.page_number,
+                "type": self.element_type or "Text",
+                "source": self.source,
+            },
+        }
 
 
 @dataclass

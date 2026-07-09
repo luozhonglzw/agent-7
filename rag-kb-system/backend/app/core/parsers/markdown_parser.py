@@ -88,9 +88,16 @@ class MarkdownParser(BaseParser):
         splits = re.split(r"^(#{1,6}\s+.+)$", raw_body, flags=re.MULTILINE)
 
         # splits[0] = content before first heading (or all content if no headings)
+        source_name = file_path.name
+
         preamble = splits[0].strip()
         if preamble:
-            pages.append(ParsedPage(page_number=1, content=preamble))
+            pages.append(ParsedPage(
+                page_number=1,
+                content=preamble,
+                element_type="NarrativeText",
+                source=source_name,
+            ))
             full_text_parts.append(preamble)
 
         # Remaining pairs: (heading_line, content_after_heading)
@@ -117,6 +124,8 @@ class MarkdownParser(BaseParser):
                     content=content,
                     heading=heading_text,
                     heading_level=level,
+                    element_type="Title",
+                    source=source_name,
                 )
             )
             full_text_parts.append(content)
@@ -132,6 +141,7 @@ class MarkdownParser(BaseParser):
             file_path.name, len(pages), len(full_text),
         )
 
+        metadata["source"] = source_name
         return ParsedDocument(
             title=title,
             pages=pages,

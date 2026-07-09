@@ -79,7 +79,12 @@ class CodeParser(BaseParser):
                 file_path=str(file_path),
             ) from exc
 
-        page = ParsedPage(page_number=1, content=content)
+        page = ParsedPage(
+            page_number=1,
+            content=content,
+            element_type="NarrativeText",
+            source=file_path.name,
+        )
 
         logger.debug(
             "Parsed code %s: %d chars", file_path.name, len(content),
@@ -89,5 +94,5 @@ class CodeParser(BaseParser):
             title=file_path.name,
             pages=[page],
             full_text=content,
-            metadata={"language": file_path.suffix.lstrip(".")},
+            metadata={"language": file_path.suffix.lstrip("."), "source": file_path.name},
         )
